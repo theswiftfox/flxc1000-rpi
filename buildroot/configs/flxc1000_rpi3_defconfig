@@ -1,0 +1,57 @@
+# FLXC1000 RPi3 B+ Buildroot defconfig
+
+# Architecture
+BR2_aarch64=y
+
+# Toolchain
+BR2_TOOLCHAIN_BUILDROOT_MUSL=y
+
+# System
+BR2_TARGET_GENERIC_HOSTNAME="flxc1000"
+BR2_TARGET_GENERIC_ISSUE="FLXC1000 ECU Simulator"
+BR2_INIT_NONE=y
+BR2_PACKAGE_BUSYBOX=n
+BR2_SYSTEM_DHCP=""
+
+# Kernel
+BR2_LINUX_KERNEL=y
+BR2_LINUX_KERNEL_CUSTOM_VERSION=y
+BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE="6.6.32"
+BR2_LINUX_KERNEL_USE_ARCH_DEFAULT_CONFIG=y
+BR2_LINUX_KERNEL_DTS_SUPPORT=y
+BR2_LINUX_KERNEL_INTREE_DTS_NAME="broadcom/bcm2837-rpi-3-b-plus"
+BR2_LINUX_KERNEL_NEEDS_HOST_OPENSSL=y
+
+# Kernel config fragments (common + RPi3-specific)
+BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_FLXC1000_RPI_PATH)/board/flxc1000-rpi/kernel.config $(BR2_EXTERNAL_FLXC1000_RPI_PATH)/board/flxc1000-rpi/kernel-rpi3.config"
+
+# Firmware (RPi3 needs bootcode.bin + standard start.elf/fixup.dat)
+BR2_PACKAGE_RPI_FIRMWARE=y
+BR2_PACKAGE_RPI_FIRMWARE_BOOTCODE_BIN=y
+BR2_PACKAGE_RPI_FIRMWARE_VARIANT_PI=y
+
+# Filesystem
+BR2_TARGET_ROOTFS_CPIO=y
+BR2_TARGET_ROOTFS_CPIO_LZ4=y
+BR2_TARGET_ROOTFS_EXT2=n
+BR2_TARGET_ROOTFS_TAR=n
+
+# Root filesystem overlay
+BR2_ROOTFS_OVERLAY="$(BR2_EXTERNAL_FLXC1000_RPI_PATH)/board/flxc1000-rpi/rootfs-overlay"
+
+# Post-build script (installs Rust binaries into rootfs staging area)
+BR2_ROOTFS_POST_BUILD_SCRIPT="$(BR2_EXTERNAL_FLXC1000_RPI_PATH)/board/flxc1000-rpi/post-build.sh"
+
+# Post-image script (generates SD card image with genimage)
+BR2_ROOTFS_POST_IMAGE_SCRIPT="$(BR2_EXTERNAL_FLXC1000_RPI_PATH)/board/flxc1000-rpi/post-image.sh"
+BR2_ROOTFS_POST_SCRIPT_ARGS="--board rpi3"
+
+# iproute2 for network configuration (minimal, needed by init for ip commands)
+BR2_PACKAGE_IPROUTE2=y
+
+# Host tools for SD card image generation (genimage)
+BR2_PACKAGE_HOST_DOSFSTOOLS=y
+BR2_PACKAGE_HOST_E2FSPROGS=y
+BR2_PACKAGE_HOST_GENEXT2FS=y
+BR2_PACKAGE_HOST_GENIMAGE=y
+BR2_PACKAGE_HOST_MTOOLS=y

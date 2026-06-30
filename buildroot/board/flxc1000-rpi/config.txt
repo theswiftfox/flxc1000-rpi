@@ -1,0 +1,10 @@
+# Raspberry Pi 4 firmware config for FLXC1000
+arm_64bit=1
+kernel=Image
+initramfs rootfs.cpio.lz4 followkernel
+
+# UART console
+enable_uart=1
+
+# GPU memory (minimum safe value — 16 causes start.elf boot failure)
+gpu_mem=64

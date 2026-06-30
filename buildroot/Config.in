@@ -1,0 +1,2 @@
+# No custom Kconfig options — configuration is handled entirely
+# by the defconfig and kernel config fragment.

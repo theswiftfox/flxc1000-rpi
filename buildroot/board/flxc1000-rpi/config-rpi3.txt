@@ -1,0 +1,14 @@
+# Raspberry Pi 3 B+ firmware config for FLXC1000
+arm_64bit=1
+kernel=Image
+initramfs rootfs.cpio.lz4 followkernel
+
+# Mainline kernel DTB (firmware defaults to bcm2710-* naming, but
+# mainline uses bcm2837-*)
+device_tree=bcm2837-rpi-3-b-plus.dtb
+
+# UART console (PL011 on GPIO 14/15)
+enable_uart=1
+
+# GPU memory (minimum safe value — 16 causes start.elf boot failure)
+gpu_mem=64

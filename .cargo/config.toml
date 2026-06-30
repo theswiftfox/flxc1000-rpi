@@ -1,0 +1,4 @@
+[target.aarch64-unknown-linux-musl]
+linker = "aarch64-linux-musl-gcc"
+# Preferred: use cargo-zigbuild instead of setting linker
+# cargo zigbuild --target aarch64-unknown-linux-musl --release
