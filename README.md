@@ -222,9 +222,9 @@ flxc1000-rpi/
 | 0x11 | ECUReset (hard=0x01, soft=0x03) | all | — |
 | 0x22 | ReadDataByIdentifier | all | — |
 | 0x27 | SecurityAccess (level 0x03) | programming, extended | — |
-| 0x34 | RequestDownload | programming | level 0x03 |
-| 0x36 | TransferData | programming | level 0x03 |
-| 0x37 | RequestTransferExit | programming | level 0x03 |
+| 0x34 | RequestDownload (stub, implementation WIP) | programming | level 0x03 |
+| 0x36 | TransferData (stub, implementation WIP) | programming | level 0x03 |
+| 0x37 | RequestTransferExit (stub, implementation WIP) | programming | level 0x03 |
 | 0x3E | TesterPresent | all | — |
 
 **SecurityAccess algorithm:** `key = seed XOR 0xDEADBEEF` (4-byte seed/key).
