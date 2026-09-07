@@ -49,10 +49,11 @@ RUST_RELEASE="${WORKSPACE_DIR}/target/aarch64-unknown-linux-musl/release"
 # config.txt etc. at the root, not in a subdirectory).
 cp "${BOARD_DIR}/${CONFIG_FILE}" "${BINARIES_DIR}/config.txt"
 
-CMDLINE_FILE="${BOARD_DIR}/cmdline-${BOARD}.txt"
-if [ -f "${CMDLINE_FILE}" ]; then
-    cp "${CMDLINE_FILE}" "${BINARIES_DIR}/cmdline.txt"
+CMDLINE_FILE="${BOARD_DIR}/cmdline.txt"
+if [ -n "${BOARD}" ] && [ -f "${BOARD_DIR}/cmdline-${BOARD}.txt" ]; then
+    CMDLINE_FILE="${BOARD_DIR}/cmdline-${BOARD}.txt"
 fi
+cp "${CMDLINE_FILE}" "${BINARIES_DIR}/cmdline.txt"
 
 # Copy Buildroot-installed firmware from rpi-firmware/ to root
 for f in bootcode.bin start.elf fixup.dat start4.elf fixup4.dat; do

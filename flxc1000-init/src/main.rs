@@ -19,6 +19,8 @@
 fn main() {
     use std::ffi::CString;
     use std::fs;
+    use std::path::Path;
+    use std::time::{Duration, Instant};
 
     use nix::mount::{mount, MsFlags};
     use nix::unistd::execve;
@@ -30,6 +32,7 @@ fn main() {
     const BOOT_STATE_PATH: &str = "/data/boot_state";
     const APP_BINARY: &str = "/app/flxc1000-app";
     const BOOT_BINARY: &str = "/boot/flxc1000-boot";
+    const MMC_TIMEOUT: Duration = Duration::from_secs(10);
 
     fn mount_pseudo_fs() {
         let _ = fs::create_dir_all("/proc");
@@ -72,6 +75,17 @@ fn main() {
         .map_err(|e| format!("mount {} -> {}: {}", device, target, e))
     }
 
+    fn wait_for_mmc_partitions() -> bool {
+        let deadline = Instant::now() + MMC_TIMEOUT;
+        while Instant::now() < deadline {
+            if Path::new(APP_PARTITION).exists() && Path::new(DATA_PARTITION).exists() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        false
+    }
+
     fn exec_binary(path: &str) -> ! {
         let c_path = CString::new(path).expect("invalid path");
         let argv = [c_path.clone()];
@@ -93,6 +107,13 @@ fn main() {
     eprintln!("[init] flxc1000-init starting as PID 1");
 
     mount_pseudo_fs();
+
+    // MMC probing is asynchronous, and this initramfs starts before the
+    // card partitions necessarily appear in /dev.
+    if !wait_for_mmc_partitions() {
+        eprintln!("[init] MMC partitions did not appear — falling back to boot");
+        exec_binary(BOOT_BINARY);
+    }
 
     if let Err(e) = mount_partition(DATA_PARTITION, DATA_MOUNT, "ext4") {
         eprintln!("[init] Failed to mount /data: {} — falling back to boot", e);

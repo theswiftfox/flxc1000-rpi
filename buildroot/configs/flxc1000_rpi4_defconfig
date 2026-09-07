@@ -6,6 +6,8 @@ BR2_aarch64=y
 
 # Toolchain
 BR2_TOOLCHAIN_BUILDROOT_MUSL=y
+# Linux headers same as kernel, a 6.1 series
+BR2_PACKAGE_HOST_LINUX_HEADERS_CUSTOM_6_1=y
 
 # System
 BR2_TARGET_GENERIC_HOSTNAME="flxc1000"
@@ -14,11 +16,15 @@ BR2_INIT_NONE=y
 BR2_PACKAGE_BUSYBOX=n
 BR2_SYSTEM_DHCP=""
 
-# Kernel
+# Kernel — Raspberry Pi fork + bcm2711 defconfig.
+# The RPi firmware loads and patches its own BCM2711 device tree, so the
+# vendor kernel/DTB pairing is used here rather than mainline (matches
+# Buildroot's raspberrypi4_64_defconfig).
 BR2_LINUX_KERNEL=y
-BR2_LINUX_KERNEL_CUSTOM_VERSION=y
-BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE="6.6.32"
-BR2_LINUX_KERNEL_USE_ARCH_DEFAULT_CONFIG=y
+BR2_LINUX_KERNEL_CUSTOM_TARBALL=y
+BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="$(call github,raspberrypi,linux,17f135b742c4edb340afb365873c3a574f7e16cb)/linux-17f135b742c4edb340afb365873c3a574f7e16cb.tar.gz"
+BR2_LINUX_KERNEL_USE_DEFCONFIG=y
+BR2_LINUX_KERNEL_DEFCONFIG="bcm2711"
 BR2_LINUX_KERNEL_DTS_SUPPORT=y
 BR2_LINUX_KERNEL_INTREE_DTS_NAME="broadcom/bcm2711-rpi-4-b"
 BR2_LINUX_KERNEL_NEEDS_HOST_OPENSSL=y
