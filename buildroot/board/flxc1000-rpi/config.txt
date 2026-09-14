@@ -1,10 +1,22 @@
 # Raspberry Pi 4 firmware config for FLXC1000
+
+# Pin the Pi 4 firmware files explicitly instead of relying on the
+# bootloader's default start*.elf selection (matches Buildroot's
+# validated board/raspberrypi/config_4_64bit.txt).
+start_file=start4.elf
+fixup_file=fixup4.dat
+
 arm_64bit=1
 kernel=Image
 initramfs rootfs.cpio.lz4 followkernel
 
+# Pin the mainline kernel DTB explicitly rather than relying on the
+# firmware's default board-to-DTB name mapping.
+device_tree=bcm2711-rpi-4-b.dtb
+
 # UART console
 enable_uart=1
 
-# GPU memory (minimum safe value — 16 causes start.elf boot failure)
-gpu_mem=64
+# GPU memory (100 MB — the value Buildroot uses for RPi4; 16 is too low
+# and causes a start*.elf boot failure)
+gpu_mem=100
