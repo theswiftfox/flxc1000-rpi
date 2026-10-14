@@ -22,3 +22,5 @@ heapless = { workspace = true }
 ace-server = { workspace = true }
 ace-sim = { workspace = true }
 flxc1000-doip = { workspace = true }
+
+rs_ws281x = "0.5.1"

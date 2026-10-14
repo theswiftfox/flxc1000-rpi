@@ -59,6 +59,23 @@ const ROUTINE_ABORTED: u8 = 0x03;
 const DTC_CODE1: [u8; 3] = [0x01, 0xE2, 0x40]; // 0x01E240
 const DTC_CODE2: [u8; 3] = [0x03, 0x94, 0x47]; // 0x039447
 
+fn request_bootloader() -> std::io::Result<()> {
+    let contents = fs::read_to_string(BOOT_STATE_PATH)?;
+
+    let mut new_contents = String::new();
+
+    for line in contents.lines() {
+        if line.starts_with("mode=") {
+            new_contents.push_str("mode=bootloader\n");
+        } else {
+            new_contents.push_str(line);
+            new_contents.push('\n');
+        }
+    }
+
+    fs::write(BOOT_STATE_PATH, new_contents)
+}
+
 // ---------------------------------------------------------------------------
 // Shared state
 // ---------------------------------------------------------------------------
@@ -276,7 +293,7 @@ impl ServerHandler for AppHandler {
         match reset_type {
             0x01 => {
                 tracing::info!("ECUReset HardReset — switching to bootloader");
-                if let Err(e) = fs::write(BOOT_STATE_PATH, "boot_requested\n") {
+                if let Err(e) = request_bootloader() {
                     tracing::error!("Failed to write boot_state: {}", e);
                     return Err(BuiltinNrc::ConditionsNotCorrect);
                 }
