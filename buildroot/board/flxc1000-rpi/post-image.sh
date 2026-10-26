@@ -70,15 +70,20 @@ trap 'rm -rf "${ROOTPATH}"' EXIT
 mkdir -p "${ROOTPATH}/app" "${ROOTPATH}/data"
 
 if [ -f "${RUST_RELEASE}/flxc1000-app" ]; then
-    cp "${RUST_RELEASE}/flxc1000-app" "${ROOTPATH}/app/flxc1000-app"
-    chmod 755 "${ROOTPATH}/app/flxc1000-app"
-    echo "==> Staged flxc1000-app into app partition"
+    cp "${RUST_RELEASE}/flxc1000-app" "${ROOTPATH}/app/flxc1000-app-v1"
+    chmod 755 "${ROOTPATH}/app/flxc1000-app-v1"
+    echo "==> Staged flxc1000-app as V1 into app partition"
 else
     echo "WARNING: flxc1000-app not found — app partition will be empty"
 fi
 
-echo "app_valid" > "${ROOTPATH}/data/boot_state"
-echo "==> Staged boot_state (app_valid) into data partition"
+cat > "${ROOTPATH}/data/boot_state" <<EOF
+active=V1
+candidate=none
+mode=application
+EOF
+
+echo "==> Staged initial A/B boot_state into data partition"
 
 # Generate SD card image (call genimage directly — Buildroot's wrapper
 # doesn't support a custom rootpath, which we need for mountpoints)
