@@ -321,9 +321,6 @@ fn main() {
         if Path::new(candidate_binary).exists() && test_candidate(candidate_binary) {
             eprintln!("[init] Candidate {:?} passed startup test", candidate);
 
-            // boot_state.active = candidate;
-            // boot_state.candidate = None;
-            // boot_state.bootloader_requested = false;
             apply_candidate_result(&mut boot_state, true);
 
             if let Err(e) = write_boot_state(&boot_state) {
@@ -338,8 +335,6 @@ fn main() {
                 candidate, boot_state.active
             );
 
-            // boot_state.candidate = None;
-            // boot_state.bootloader_requested = false;
             apply_candidate_result(&mut boot_state, false);
 
             if let Err(e) = write_boot_state(&boot_state) {
