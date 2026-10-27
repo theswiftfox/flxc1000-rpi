@@ -26,7 +26,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt"] }
 thiserror = "2"
 bytes = "1"
-rppal = "0.19"
+rppal = { version = "0.19", features = ["hal"] }
+embedded-graphics = "0.8"
+ssd1306 = "0.10"
 nix = { version = "0.29", features = ["mount", "process", "fs", "signal"] }
 heapless = "0.9"
 

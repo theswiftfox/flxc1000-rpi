@@ -14,7 +14,7 @@
 use std::ffi::CString;
 use std::fs;
 use std::process;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -27,6 +27,8 @@ use ace_sim::clock::Instant as AceInstant;
 use ace_sim::io::NodeAddress;
 
 use flxc1000_doip::server::{get_mac_address, DoipConfig, DoipServer};
+mod oled;
+mod rgb;
 
 const ECU_ADDRESS: u16 = 0x1000;
 const VIN: &[u8; 17] = b"FLXC1000TEST00001";
@@ -35,16 +37,6 @@ const VIN: &[u8; 17] = b"FLXC1000TEST00001";
 const VARIANT_ID: [u8; 3] = [0x00, 0x01, 0x01];
 
 const BOOT_STATE_PATH: &str = "/data/boot_state";
-
-/// GPIO pins for the 5-LED bar (active-high, header pins 29-37 odd).
-/// LED1 (dimmest) → LED5 (brightest). GND on pin 39.
-const LED_PINS: [u8; 5] = [5, 6, 13, 19, 26];
-
-/// PWM duty cycles for each LED (0.0–1.0) — increasing brightness.
-const LED_DUTY: [f64; 5] = [0.40, 0.55, 0.70, 0.85, 1.00];
-
-/// Software-PWM frequency for LED brightness control (Hz).
-const LED_PWM_FREQ: f64 = 1000.0;
 
 const RESET_NONE: u8 = 0;
 const RESET_HARD: u8 = 1;
@@ -58,6 +50,10 @@ const ROUTINE_ABORTED: u8 = 0x03;
 /// Hardcoded test DTCs
 const DTC_CODE1: [u8; 3] = [0x01, 0xE2, 0x40]; // 0x01E240
 const DTC_CODE2: [u8; 3] = [0x03, 0x94, 0x47]; // 0x039447
+
+const FLUX_READY: u8 = 0x00;
+const FLUX_READING: u8 = 0x01;
+const FLUX_ERROR: u8 = 0x02;
 
 // ---------------------------------------------------------------------------
 // Shared state
@@ -75,141 +71,85 @@ struct SharedState {
     routine_status: AtomicU8,
     vin: Mutex<[u8; 17]>,
     dtcs: Mutex<Vec<Dtc>>,
-    gpio: Option<rppal::gpio::Gpio>,
+
+    //Bits 0-7 represent the eight old LEDs.
+    rgb_led_mask: AtomicU8,
+    diagnostic_activity: AtomicBool,
+
+    //gpio: Option<rppal::gpio::Gpio>,
     flux_capacitor_power: i32,
+    flux_state: AtomicU8,
+    last_error: Mutex<Option<String>>,
 }
 
 impl SharedState {
-    /// Set a single LED on or off (full brightness, no PWM).
+    fn set_last_error(&self, msg: impl Into<String>) {
+        let msh: String = msg.into().chars().take(42).collect();
+
+        if let Ok(mut last_error) = self.last_error.lock() {
+            *last_error = Some(msh);
+        }
+    }
+    fn signal_diagnostic_activity(&self) {
+        self.diagnostic_activity.store(true, Ordering::Relaxed);
+    }
+
     fn set_led(&self, index: usize, high: bool) {
-        let pin_num = LED_PINS[index];
-        if let Some(ref gpio) = self.gpio {
-            match gpio.get(pin_num) {
-                Ok(pin) => {
-                    let mut pin = pin.into_output();
-                    pin.set_reset_on_drop(false);
-                    if high {
-                        pin.set_high();
-                    } else {
-                        pin.set_low();
-                    }
-                }
-                Err(e) => tracing::warn!("GPIO pin {} access failed: {}", pin_num, e),
-            }
+        if index >= 8 {
+            return;
+        }
+
+        let bit = 1u8 << index;
+
+        if high {
+            self.rgb_led_mask.fetch_or(bit, Ordering::SeqCst);
         } else {
-            tracing::debug!(
-                "GPIO simulated: LED{} (pin {}) = {}",
-                index + 1,
-                pin_num,
-                if high { "HIGH" } else { "LOW" }
-            );
+            self.rgb_led_mask.fetch_and(!bit, Ordering::SeqCst);
         }
     }
 
-    /// Turn all LEDs off.
     fn all_leds_off(&self) {
-        for i in 0..LED_PINS.len() {
-            self.set_led(i, false);
-        }
+        self.rgb_led_mask.store(0, Ordering::SeqCst);
     }
 
-    /// Light a single LED at its designated PWM brightness for `duration_ms`,
-    /// then turn it off.
     fn pulse_led(&self, index: usize, duration_ms: u64) {
-        let pin_num = LED_PINS[index];
-        let duty = LED_DUTY[index];
-        if let Some(ref gpio) = self.gpio {
-            match gpio.get(pin_num) {
-                Ok(pin) => {
-                    let mut pin = pin.into_output();
-                    pin.set_reset_on_drop(false);
-                    if let Err(e) = pin.set_pwm_frequency(LED_PWM_FREQ, duty) {
-                        tracing::warn!(
-                            "PWM on pin {} failed: {} — falling back to digital",
-                            pin_num,
-                            e
-                        );
-                        pin.set_high();
-                    }
-                    std::thread::sleep(Duration::from_millis(duration_ms));
-                    let _ = pin.clear_pwm();
-                    pin.set_low();
-                }
-                Err(e) => {
-                    tracing::warn!("GPIO pin {} access failed: {}", pin_num, e);
-                    std::thread::sleep(Duration::from_millis(duration_ms));
-                }
-            }
-        } else {
-            tracing::debug!(
-                "GPIO simulated: LED{} (pin {}) PWM duty={:.0}% for {}ms",
-                index + 1,
-                pin_num,
-                duty * 100.0,
-                duration_ms,
-            );
-            std::thread::sleep(Duration::from_millis(duration_ms));
-        }
+        self.set_led(index, true);
+        std::thread::sleep(Duration::from_millis(duration_ms));
+        self.set_led(index, false);
     }
 
-    /// Self-test LED cascade: lights LEDs 1→5 one after another, each at its
-    /// designated brightness, holds all on briefly, then turns all off.
-    /// Updates `routine_status` atomically so the handler can poll it.
     fn led_cascade_test(&self) {
         self.routine_status.store(ROUTINE_RUNNING, Ordering::SeqCst);
+
         self.all_leds_off();
 
-        // Keep all OutputPin handles alive so their PWM threads persist.
-        let mut active_pins: Vec<rppal::gpio::OutputPin> = Vec::with_capacity(LED_PINS.len());
-
-        // Light each LED in sequence (previous ones stay on)
-        for i in 0..LED_PINS.len() {
-            // Check for abort between LEDs
+        //Light logical LEDs 1-> 8 progressively.
+        for i in 0..8 {
             if self.routine_status.load(Ordering::SeqCst) == ROUTINE_ABORTED {
                 tracing::info!("SelfTest aborted during cascade");
-                drop(active_pins);
                 self.all_leds_off();
                 return;
             }
-            let pin_num = LED_PINS[i];
-            let duty = LED_DUTY[i];
-            if let Some(ref gpio) = self.gpio {
-                if let Ok(pin) = gpio.get(pin_num) {
-                    let mut pin = pin.into_output();
-                    if let Err(e) = pin.set_pwm_frequency(LED_PWM_FREQ, duty) {
-                        tracing::warn!(
-                            "PWM on pin {} failed: {} — falling back to digital",
-                            pin_num,
-                            e
-                        );
-                        pin.set_high();
-                    }
-                    active_pins.push(pin);
-                }
-            } else {
-                tracing::debug!(
-                    "GPIO simulated: LED{} (pin {}) ON at {:.0}%",
-                    i + 1,
-                    pin_num,
-                    duty * 100.0
-                );
-            }
+
+            self.set_led(i, true);
             std::thread::sleep(Duration::from_millis(200));
         }
-        // Hold all LEDs on for a moment
-        std::thread::sleep(Duration::from_millis(500));
-        // Drop all handles — stops PWM threads and resets pins
-        drop(active_pins);
+
+        // Hold all LEDs on briefly
+        std::thread::sleep(Duration::from_millis(200));
+
         self.all_leds_off();
+
         self.routine_status
             .store(ROUTINE_COMPLETED, Ordering::SeqCst);
-        tracing::info!("SelfTest LED cascade completed");
+
+        tracing::info!("RGB SelfTest cascade completed");
     }
 
-    /// Boot-up blink: flash all 5 LEDs twice to signal the app is ready.
+    /// Boot-up blink: flash all 8 LEDs twice to signal the app is ready.
     fn boot_blink(&self) {
         for _ in 0..2 {
-            for i in 0..LED_PINS.len() {
+            for i in 0..8 {
                 self.set_led(i, true);
             }
             std::thread::sleep(Duration::from_millis(150));
@@ -247,10 +187,15 @@ impl ServerHandler for AppHandler {
             }
             0xF200 => {
                 // FluxCapacitorPowerConsumption — toggle LED1 while reading
+                self.shared.flux_state.store(FLUX_READING, Ordering::SeqCst);
+
                 self.shared.set_led(0, true);
                 let bytes = self.shared.flux_capacitor_power.to_be_bytes();
                 buf[..4].copy_from_slice(&bytes);
                 self.shared.set_led(0, false);
+
+                self.shared.flux_state.store(FLUX_READY, Ordering::SeqCst);
+
                 Ok(4)
             }
             _ => Err(BuiltinNrc::RequestOutOfRange),
@@ -304,8 +249,8 @@ impl ServerHandler for AppHandler {
                     return Err(BuiltinNrc::RequestSequenceError);
                 }
                 tracing::info!(
-                    "RoutineControl SelfTest Start — LED cascade on pins {:?}",
-                    LED_PINS
+                    "RoutineControl SelfTest Start — RGB #2 cascade",
+                    //LED_PINS
                 );
                 let shared = Arc::clone(&self.shared);
                 std::thread::spawn(move || {
@@ -507,15 +452,11 @@ async fn main() {
     let doip = DoipServer::new(doip_config);
     let mut uds_rx = doip.run().await.expect("Failed to start DoIP server");
 
-    let gpio = rppal::gpio::Gpio::new().ok();
-    if gpio.is_none() {
-        tracing::warn!("GPIO not available — GPIO features will be simulated only");
-    }
-
     let shared = Arc::new(SharedState {
         pending_reset: AtomicU8::new(RESET_NONE),
         session_type: AtomicU8::new(0x01),
         routine_status: AtomicU8::new(ROUTINE_IDLE),
+        diagnostic_activity: AtomicBool::new(false),
         vin: Mutex::new(*VIN),
         dtcs: Mutex::new(vec![
             Dtc {
@@ -527,8 +468,11 @@ async fn main() {
                 status: 0x24,
             },
         ]),
-        gpio,
+        //gpio,
+        rgb_led_mask: AtomicU8::new(0),
         flux_capacitor_power: 1210, // 1.21 GW
+        flux_state: AtomicU8::new(FLUX_READY),
+        last_error: Mutex::new(None),
     });
 
     let handler = AppHandler {
@@ -541,6 +485,11 @@ async fn main() {
         AppSecurity,
         NodeAddress(ECU_ADDRESS as u32),
     );
+
+    oled::spawn_status_task(Arc::clone(&shared));
+
+    //RGB sticks shows Ethernet connection status
+    rgb::spawn_status_task(Arc::clone(&shared));
 
     // Signal boot-up by blinking all LEDs twice
     shared.boot_blink();
@@ -555,6 +504,9 @@ async fn main() {
             data = format_args!("{:02X?}", &req.data),
             "UDS request"
         );
+
+        //Trigger communication light show
+        shared.signal_diagnostic_activity();
 
         let now = ace_now(&boot_time);
         shared
@@ -594,6 +546,7 @@ async fn main() {
         tracing::debug!(data = format_args!("{:02X?}", &response), "UDS response");
 
         if let Err(e) = req.response_tx.send(response).await {
+            shared.set_last_error(format!("UDS response: {e}"));
             tracing::error!("Failed to send UDS response: {}", e);
         }
 

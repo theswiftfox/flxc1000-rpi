@@ -23,3 +23,6 @@ ace-server = { workspace = true }
 ace-sim = { workspace = true }
 rppal = { workspace = true }
 flxc1000-doip = { workspace = true }
+ssd1306 = "0.10"
+embedded-graphics = "0.8"
+rs_ws281x = "0.5.1"
