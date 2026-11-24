@@ -108,6 +108,49 @@ impl BootState {
     }
 }
 
+fn check_existing_mount(
+    mountinfo: &str,
+    device: &str,
+    target: &str,
+    fstype: &str,
+) -> Result<bool, String> {
+    let mut found = false;
+
+    for line in mountinfo.lines() {
+        let Some((before, after)) = line.split_once(" - ") else {
+            return Err("Malformed mountinfo entry".to_string());
+        };
+
+        let fields: Vec<&str> = before.split_whitespace().collect();
+        let details: Vec<&str> = after.split_whitespace().collect();
+
+        if fields.len() < 6 || details.len() < 3 {
+            return Err("Incomplete mountinfo entry".to_string());
+        }
+
+        let mounted_target = fields[4];
+        let mounted_fstype = details[0];
+        let mounted_device = details[1];
+
+        if mounted_target == target {
+            if found {
+                return Err(format!("Multiple mounts detected at {}", target));
+            }
+
+            found = true;
+
+            if mounted_device != device || mounted_fstype != fstype {
+                return Err(format!(
+                    "Unexpected mount at {}: {} ({})",
+                    target, mounted_device, mounted_fstype
+                ));
+            }
+        }
+    }
+
+    Ok(found)
+}
+
 fn apply_candidate_result(state: &mut BootState, succesful: bool) {
     if let Some(candidate) = state.candidate {
         if succesful {
@@ -229,7 +272,16 @@ fn main() {
     }
 
     fn mount_partition(device: &str, target: &str, fstype: &str) -> Result<(), String> {
-        let _ = fs::create_dir_all(target);
+        let mountinfo = fs::read_to_string("/proc/self/mountinfo")
+            .map_err(|e| format!("Failed to read mountinfo: {}", e))?;
+
+        if check_existing_mount(&mountinfo, device, target, fstype)? {
+            eprintln!("[init] {} already mounted correctly at {}", device, target);
+            return Ok(());
+        }
+
+        fs::create_dir_all(target)
+            .map_err(|e| format!("Failed to create mount point {}: {}", target, e))?;
         mount(
             Some(device),
             target,
@@ -436,6 +488,54 @@ mod tests {
         assert_eq!(state.active, AppSlot::V1);
         assert_eq!(state.candidate, None);
         assert!(!state.bootloader_requested);
+    }
+
+    #[test]
+    fn test_existing_mount_matches() {
+        let mountinfo = "36 25 179:3 / /data rw,relatime - ext4 /dev/mmcblk0p3 rw\n";
+
+        let result = check_existing_mount(mountinfo, "/dev/mmcblk0p3", "/data", "ext4");
+
+        assert_eq!(result.unwrap(), true);
+    }
+
+    #[test]
+    fn test_existing_mount_not_found() {
+        let mountinfo = "36 25 179:3 / /other rw,relatime - ext4 /dev/mmcblk0p3 rw\n";
+
+        let result = check_existing_mount(mountinfo, "/dev/mmcblk0p3", "/data", "ext4");
+
+        assert_eq!(result.unwrap(), false);
+    }
+
+    #[test]
+    fn test_existing_mount_wrong_device() {
+        let mountinfo = "36 25 179:2 / /data rw,relatime - ext4 /dev/mmcblk0p2 rw\n";
+
+        let result = check_existing_mount(mountinfo, "/dev/mmcblk0p3", "/data", "ext4");
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_existing_mount_wrong_filesystem() {
+        let mountinfo = "36 25 179:3 / /data rw,relatime - vfat /dev/mmcblk0p3 rw\n";
+
+        let result = check_existing_mount(mountinfo, "/dev/mmcblk0p3", "/data", "ext4");
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_existing_mount_duplicate_target() {
+        let mountinfo = concat!(
+            "36 25 179:3 / /data rw,relatime - ext4 /dev/mmcblk0p3 rw\n",
+            "42 36 179:3 / /data rw,relatime - ext4 /dev/mmcblk0p3 rw\n"
+        );
+
+        let result = check_existing_mount(mountinfo, "/dev/mmcblk0p3", "/data", "ext4");
+
+        assert!(result.is_err());
     }
 
     #[cfg(target_os = "linux")]
