@@ -108,6 +108,149 @@ impl BootState {
     }
 }
 
+fn consume_bootloader_request(contents: &str) -> std::io::Result<Option<String>> {
+    use std::io::{Error, ErrorKind};
+
+    let invalid = |message| Error::new(ErrorKind::InvalidData, message);
+
+    let mut active = None;
+    let mut candidate = None;
+    let mut mode = None;
+
+    let mut offset = 0;
+    for raw_line in contents.split_inclusive('\n') {
+        let line = raw_line.lines().next().unwrap_or_default();
+        if let Some(value) = line.strip_prefix("active=") {
+            if active.is_some() || AppSlot::from_str(value).is_none() {
+                return Err(invalid("invalid or duplicate active slot"));
+            }
+            active = Some(value);
+        } else if let Some(value) = line.strip_prefix("candidate=") {
+            if candidate.is_some() || (value != "none" && AppSlot::from_str(value).is_none()) {
+                return Err(invalid("invalid or duplicate candidate slot"));
+            }
+            candidate = Some(value);
+        } else if let Some(value) = line.strip_prefix("mode=") {
+            if mode.is_some() || !matches!(value, "application" | "bootloader") {
+                return Err(invalid("invalid or duplicate boot mode"));
+            }
+            mode = Some((value, offset + "mode=".len()));
+        }
+        offset += raw_line.len();
+    }
+
+    let active = active.ok_or_else(|| invalid("missing active slot"))?;
+    let candidate = candidate.ok_or_else(|| invalid("missing candidate slot"))?;
+    let (mode, mode_offset) = mode.ok_or_else(|| invalid("missing boot mode"))?;
+
+    if candidate == active {
+        return Err(invalid("candidate matches active slot"));
+    }
+
+    if mode == "application" {
+        return Ok(None);
+    }
+
+    let mut updated = contents.to_owned();
+    updated.replace_range(mode_offset..mode_offset + mode.len(), "application");
+    Ok(Some(updated))
+}
+
+#[cfg(target_os = "linux")]
+fn persist_consumed_request(path: &std::path::Path, contents: &str) -> std::io::Result<()> {
+    use std::fs::{self, File};
+    use std::io::Write;
+    let temporary_path = path.with_extension("handoff.tmp");
+
+    let mut file = File::create(&temporary_path)?;
+    file.write_all(contents.as_bytes())?;
+    file.sync_all()?;
+    drop(file);
+
+    fs::rename(&temporary_path, path)?;
+
+    if let Some(parent) = path.parent() {
+        File::open(parent)?.sync_all()?;
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+enum HandoffOutcome {
+    StartBootloader,
+    RestartActive(AppSlot),
+    ContinueNormalStartup(BootState),
+    Unsafe,
+}
+
+#[cfg(target_os = "linux")]
+fn handle_bootloader_handoff(
+    path: &std::path::Path,
+    mut persist: impl FnMut(&std::path::Path, &str) -> std::io::Result<()>,
+) -> HandoffOutcome {
+    use std::fs::read_to_string;
+
+    let original = match read_to_string(path) {
+        Ok(contents) => contents,
+        Err(e) => {
+            eprintln!("[init] Failed to read boot state: {e}");
+            return HandoffOutcome::Unsafe;
+        }
+    };
+    let expected = match consume_bootloader_request(&original) {
+        Ok(Some(updated)) => updated,
+        Ok(None) => return HandoffOutcome::ContinueNormalStartup(BootState::parse(&original)),
+        Err(e) => {
+            eprintln!("[init] Invalid boot state: {e}");
+            return HandoffOutcome::Unsafe;
+        }
+    };
+
+    match persist(path, &expected) {
+        Ok(()) => return HandoffOutcome::StartBootloader,
+        Err(e) => eprintln!("[init] Failed to persist bootloader handoff: {e}"),
+    }
+
+    match read_to_string(path) {
+        Ok(actual) if actual == expected => {
+            eprintln!("[init] Updated boot state is visible, but power-loss durability is unconfirmed");
+            return HandoffOutcome::StartBootloader;
+        }
+        Ok(actual) if actual == original => {}
+        Ok(_) => {
+            eprintln!("[init] Unexpected boot state after handoff failure");
+            return HandoffOutcome::Unsafe;
+        }
+        Err(e) => {
+            eprintln!("[init] Could not read back boot state after handoff failure: {e}");
+            return HandoffOutcome::Unsafe;
+        }
+    }
+
+    // The original validated request is still present. Try to cancel it once.
+    // Restart only after the write succeeds and exact read-back confirms the request is cleared.
+    if let Err(e) = persist(path, &expected) {
+        eprintln!("[init] Failed to persist update cancellation: {e}");
+        return HandoffOutcome::Unsafe;
+    }
+
+    match read_to_string(path) {
+        Ok(actual) if actual == expected => {
+            HandoffOutcome::RestartActive(BootState::parse(&original).active)
+        }
+        Ok(_) => {
+            eprintln!("[init] Boot state did not match the expected cancellation");
+            HandoffOutcome::Unsafe
+        }
+        Err(e) => {
+            eprintln!("[init] Could not verify update cancellation: {e}");
+            HandoffOutcome::Unsafe
+        }
+    }
+}
+
 fn check_existing_mount(
     mountinfo: &str,
     device: &str,
@@ -210,6 +353,15 @@ fn test_candidate(path: &str) -> bool {
     }
 
     true
+}
+
+#[cfg(target_os = "linux")]
+fn hold_on_unsafe_boot_state() -> ! {
+    eprintln!("[init] FATAL: boot state cannot be verified; refusing to continue");
+
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(60));
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -342,12 +494,6 @@ fn main() {
         exec_binary(BOOT_BINARY);
     }
 
-    let boot_state_contents = fs::read_to_string(BOOT_STATE_PATH).unwrap_or_default();
-
-    let boot_state = BootState::parse(&boot_state_contents);
-
-    eprintln!("[init] boot_state = {:?}", boot_state);
-
     // Start SSH Server
     if let Err(e) = Command::new("/usr/sbin/sshd").spawn() {
         eprintln!("Failed to start start openssh server {:?}", e);
@@ -355,12 +501,28 @@ fn main() {
         eprintln!("Succeded to start start openssh server");
     }
 
-    if boot_state.bootloader_requested {
-        eprintln!("[init] Bootloader requested");
-        exec_binary(BOOT_BINARY);
-    }
+    let mut boot_state = match handle_bootloader_handoff(
+        Path::new(BOOT_STATE_PATH),
+        persist_consumed_request,
+    ) {
+        HandoffOutcome::StartBootloader => {
+            eprintln!("[init] Bootloader request consumed");
+            exec_binary(BOOT_BINARY);
+        }
+        HandoffOutcome::RestartActive(slot) => {
+            let path = slot.binary_path();
+            if !Path::new(path).is_file() {
+                eprintln!("[init] Active application binary missing: {path}");
+                hold_on_unsafe_boot_state();
+            }
+            eprintln!("[init] Update handoff cancelled; restarting {slot:?}");
+            exec_binary(path);
+        }
+        HandoffOutcome::ContinueNormalStartup(state) => state,
+        HandoffOutcome::Unsafe => hold_on_unsafe_boot_state(),
+    };
 
-    let mut boot_state = boot_state;
+    eprintln!("[init] boot_state = {:?}", boot_state);
 
     if let Some(candidate) = boot_state.candidate {
         let candidate_binary = candidate.binary_path();
@@ -536,6 +698,219 @@ mod tests {
         let result = check_existing_mount(mountinfo, "/dev/mmcblk0p3", "/data", "ext4");
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_consume_bootloader_request_lf() {
+        let before = "active=V2\ncandidate=V1\nmode=bootloader\n";
+        let expected = "active=V2\ncandidate=V1\nmode=application\n";
+
+        let result = consume_bootloader_request(before).unwrap();
+
+        assert_eq!(result.as_deref(), Some(expected));
+    }
+
+    #[test]
+    fn test_consume_bootloader_request() {
+        let before = "note=mode=bootloader\r\nactive=V2\r\ncandidate=V1\r\nmode=bootloader\r\nextra=keep";
+        let expected = "note=mode=bootloader\r\nactive=V2\r\ncandidate=V1\r\nmode=application\r\nextra=keep";
+
+        let result = consume_bootloader_request(before).unwrap();
+
+        assert_eq!(result.as_deref(), Some(expected));
+    }
+
+    #[test]
+    fn test_no_bootloader_request() {
+        let state = "active=V1\ncandidate=none\nmode=application\n";
+
+        let result = consume_bootloader_request(state).unwrap();
+
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_consume_bootloader_request_rejects_invalid_state() {
+        for state in [
+            "",
+            "active=V2\nmode=bootloader\n",
+            "active=V3\ncandidate=none\nmode=bootloader\n",
+            "active=V2\ncandidate=V3\nmode=bootloader\n",
+            "active=V2\ncandidate=V2\nmode=bootloader\n",
+            "active=V2\ncandidate=none\n",
+            "active=V2\ncandidate=none\nmode=recovery\n",
+            "active=V2\nactive=V1\ncandidate=none\nmode=bootloader\n",
+            "active=V2\ncandidate=none\ncandidate=V1\nmode=bootloader\n",
+            "active=V2\ncandidate=none\nmode=bootloader\nmode=application\n",
+        ] {
+            let error = consume_bootloader_request(state).unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidData, "{state:?}");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    mod handoff {
+        use super::*;
+        use std::{fs, io, path::PathBuf};
+
+        const ORIGINAL: &str = "active=V1\ncandidate=V2\nmode=bootloader\n";
+        const EXPECTED: &str = "active=V1\ncandidate=V2\nmode=application\n";
+
+        fn test_path(name: &str) -> PathBuf {
+            std::env::temp_dir().join(format!("flxc-handoff-{}-{name}", std::process::id()))
+        }
+
+        fn write_error() -> io::Result<()> {
+            Err(io::Error::other("simulated persistence failure"))
+        }
+
+        #[test]
+        fn normal_startup_does_not_write() {
+            let path = test_path("normal");
+            fs::write(&path, EXPECTED).unwrap();
+            let outcome = handle_bootloader_handoff(&path, |_, _| panic!("unexpected write"));
+            assert!(matches!(outcome, HandoffOutcome::ContinueNormalStartup(state)
+                if state.active == AppSlot::V1 && state.candidate == Some(AppSlot::V2)));
+            fs::remove_file(path).unwrap();
+        }
+
+        #[test]
+        fn successful_handoff() {
+            let path = test_path("success");
+            fs::write(&path, ORIGINAL).unwrap();
+            let outcome = handle_bootloader_handoff(&path, persist_consumed_request);
+            assert!(matches!(outcome, HandoffOutcome::StartBootloader));
+            assert_eq!(fs::read_to_string(&path).unwrap(), EXPECTED);
+            fs::remove_file(path).unwrap();
+        }
+
+        #[test]
+        fn visible_handoff_after_error_does_not_retry() {
+            let path = test_path("visible");
+            fs::write(&path, ORIGINAL).unwrap();
+            let mut writes = 0;
+            let outcome = handle_bootloader_handoff(&path, |path, contents| {
+                writes += 1;
+                persist_consumed_request(path, contents).unwrap();
+                write_error()
+            });
+            assert!(matches!(outcome, HandoffOutcome::StartBootloader));
+            assert_eq!(writes, 1);
+            assert_eq!(fs::read_to_string(&path).unwrap(), EXPECTED);
+            fs::remove_file(path).unwrap();
+        }
+
+        #[test]
+        fn verified_cancellation_restarts_original_slot() {
+            for active in [AppSlot::V1, AppSlot::V2] {
+                let path = test_path(active.as_str());
+                let candidate = if active == AppSlot::V1 { "V2" } else { "V1" };
+                let fields = format!("active={}\ncandidate={candidate}\nextra=keep\n", active.as_str());
+                fs::write(&path, format!("{fields}mode=bootloader\n")).unwrap();
+                let mut writes = 0;
+                let outcome = handle_bootloader_handoff(&path, |path, contents| {
+                    writes += 1;
+                    if writes == 1 {
+                        return write_error();
+                    }
+                    persist_consumed_request(path, contents)
+                });
+                assert!(matches!(outcome, HandoffOutcome::RestartActive(slot) if slot == active));
+                assert_eq!(writes, 2);
+                assert_eq!(fs::read_to_string(&path).unwrap(), format!("{fields}mode=application\n"));
+                fs::remove_file(path).unwrap();
+            }
+        }
+
+        #[test]
+        fn failed_or_unverified_cancellation_is_unsafe() {
+            let path = test_path("failed-cancel");
+            for failure in 0..3 {
+                fs::write(&path, ORIGINAL).unwrap();
+                let mut writes = 0;
+                let outcome = handle_bootloader_handoff(&path, |path, contents| {
+                    writes += 1;
+                    match (writes, failure) {
+                        (2, 1) => Ok(()), // Writer reports success but state did not change.
+                        (2, 2) => {
+                            persist_consumed_request(path, contents).unwrap();
+                            write_error()
+                        }
+                        _ => write_error(),
+                    }
+                });
+                assert!(matches!(outcome, HandoffOutcome::Unsafe));
+                assert_eq!(writes, 2);
+            }
+            fs::remove_file(path).unwrap();
+        }
+
+        #[test]
+        fn unexpected_read_back_does_not_retry() {
+            let path = test_path("unexpected");
+            for unreadable in [false, true] {
+                fs::write(&path, ORIGINAL).unwrap();
+                let mut writes = 0;
+                let outcome = handle_bootloader_handoff(&path, |path, _| {
+                    writes += 1;
+                    if unreadable {
+                        fs::remove_file(path).unwrap();
+                    } else {
+                        fs::write(path, "active=INVALID\n").unwrap();
+                    }
+                    write_error()
+                });
+                assert!(matches!(outcome, HandoffOutcome::Unsafe));
+                assert_eq!(writes, 1);
+            }
+        }
+
+        #[test]
+        fn missing_unreadable_or_malformed_state_does_not_write() {
+            let path = test_path("invalid");
+            let _ = fs::remove_file(&path);
+            let check = || {
+                assert!(matches!(
+                    handle_bootloader_handoff(&path, |_, _| panic!("unexpected write")),
+                    HandoffOutcome::Unsafe
+                ));
+            };
+            check();
+            fs::write(&path, [0xff]).unwrap();
+            check();
+            fs::write(&path, "candidate=none\nmode=bootloader\n").unwrap();
+            check();
+            fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_persist_consumed_request() {
+        use std::fs;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory =
+            std::env::temp_dir().join(format!("flxc1000-handoff-{}-{unique}", std::process::id()));
+        fs::create_dir(&directory).unwrap();
+        let path = directory.join("boot_state");
+        let original = "active=V2\ncandidate=V1\nmode=bootloader\nextra=keep\n";
+        fs::write(&path, original).unwrap();
+
+        let updated = consume_bootloader_request(original)
+            .unwrap()
+            .expect("bootloader request should be present");
+        persist_consumed_request(&path, &updated).unwrap();
+
+        let saved = fs::read_to_string(&path).unwrap();
+        assert_eq!(saved, updated);
+        assert!(saved.contains("mode=application"));
+        assert!(!path.with_extension("handoff.tmp").exists());
+        fs::remove_dir_all(&directory).unwrap();
     }
 
     #[cfg(target_os = "linux")]
