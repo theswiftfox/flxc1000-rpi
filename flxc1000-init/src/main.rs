@@ -26,11 +26,27 @@ enum AppSlot {
     V2,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum UpdateStatus {
+    Unknown,
+    Success,
+    Rollback,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RollbackReason {
+    None,
+    MissingBinary,
+    StartupFailed,
+}
+
 #[derive(Debug)]
 struct BootState {
     active: AppSlot,
     candidate: Option<AppSlot>,
     bootloader_requested: bool,
+    last_update: UpdateStatus,
+    rollback_reason: RollbackReason,
 }
 
 impl AppSlot {
@@ -63,6 +79,8 @@ impl BootState {
             active: AppSlot::V1,
             candidate: None,
             bootloader_requested: false,
+            last_update: UpdateStatus::Unknown,
+            rollback_reason: RollbackReason::None,
         }
     }
 
@@ -81,6 +99,19 @@ impl BootState {
                 };
             } else if let Some(value) = line.strip_prefix("mode=") {
                 state.bootloader_requested = value == "bootloader";
+            } else if let Some(value) = line.strip_prefix("last_update=") {
+                state.last_update = match value {
+                    "success" => UpdateStatus::Success,
+                    "rollback" => UpdateStatus::Rollback,
+                    _ => UpdateStatus::Unknown,
+                };
+            } else if let Some(value) = line.strip_prefix("rollback_reason=") {
+                state.rollback_reason = match value {
+                    "none" => RollbackReason::None,
+                    "missing_binary" => RollbackReason::MissingBinary,
+                    "startup_failed" => RollbackReason::StartupFailed,
+                    _ => RollbackReason::None,
+                };
             }
         }
 
@@ -99,11 +130,25 @@ impl BootState {
             "application"
         };
 
+        let last_update = match self.last_update {
+            UpdateStatus::Unknown => "unknown",
+            UpdateStatus::Success => "success",
+            UpdateStatus::Rollback => "rollback",
+        };
+
+        let rollback_reason = match self.rollback_reason {
+            RollbackReason::None => "none",
+            RollbackReason::MissingBinary => "missing_binary",
+            RollbackReason::StartupFailed => "startup_failed",
+        };
+
         format!(
-            "active={}\ncandidate={}\nmode={}\n",
+            "active={}\ncandidate={}\nmode={}\nlast_update={}\nrollback_reason={}\n",
             self.active.as_str(),
             candidate,
-            mode
+            mode,
+            last_update,
+            rollback_reason
         )
     }
 }
@@ -298,6 +343,9 @@ fn apply_candidate_result(state: &mut BootState, succesful: bool) {
     if let Some(candidate) = state.candidate {
         if succesful {
             state.active = candidate;
+            state.last_update = UpdateStatus::Success;
+        } else {
+            state.last_update = UpdateStatus::Rollback;
         }
 
         state.candidate = None;
@@ -532,10 +580,19 @@ fn main() {
             candidate, candidate_binary
         );
 
-        if Path::new(candidate_binary).exists() && test_candidate(candidate_binary) {
+        let rollback_reason = if !Path::new(candidate_binary).exists() {
+            RollbackReason::MissingBinary
+        } else if !test_candidate(candidate_binary) {
+            RollbackReason::StartupFailed
+        } else {
+            RollbackReason::None
+        };
+
+        if rollback_reason == RollbackReason::None {
             eprintln!("[init] Candidate {:?} passed startup test", candidate);
 
             apply_candidate_result(&mut boot_state, true);
+            boot_state.rollback_reason = RollbackReason::None;
 
             if let Err(e) = write_boot_state(&boot_state) {
                 eprintln!("[init] Failed to save successful candidate: {}", e);
@@ -550,6 +607,7 @@ fn main() {
             );
 
             apply_candidate_result(&mut boot_state, false);
+            boot_state.rollback_reason = rollback_reason;
 
             if let Err(e) = write_boot_state(&boot_state) {
                 eprintln!("[init] Failed to save rollback state: {}", e);
@@ -626,7 +684,7 @@ mod tests {
 
         assert_eq!(
             state.to_text(),
-            "active=V2\ncandidate=none\nmode=application\n"
+            "active=V2\ncandidate=none\nmode=application\nlast_update=unknown\nrollback_reason=none\n"
         );
     }
 
@@ -650,6 +708,60 @@ mod tests {
         assert_eq!(state.active, AppSlot::V1);
         assert_eq!(state.candidate, None);
         assert!(!state.bootloader_requested);
+    }
+
+    #[test]
+    fn test_legacy_boot_state_defaults_to_no_diagnostics() {
+        let state = BootState::parse("active=V2\ncandidate=V1\nmode=bootloader\n");
+
+        assert_eq!(state.active, AppSlot::V2);
+        assert_eq!(state.candidate, Some(AppSlot::V1));
+        assert!(state.bootloader_requested);
+        assert_eq!(state.last_update, UpdateStatus::Unknown);
+        assert_eq!(state.rollback_reason, RollbackReason::None);
+    }
+
+    #[test]
+    fn test_update_status_persistence() {
+        let mut state = BootState::parse("active=V1\ncandidate=V2\nmode=application\n");
+        apply_candidate_result(&mut state, true);
+
+        let restored = BootState::parse(&state.to_text());
+        assert_eq!(restored.active, AppSlot::V2);
+        assert_eq!(restored.candidate, None);
+        assert_eq!(restored.last_update, UpdateStatus::Success);
+        assert_eq!(restored.rollback_reason, RollbackReason::None);
+    }
+
+    #[test]
+    fn test_rollback_reason_persistence() {
+        for reason in [RollbackReason::MissingBinary, RollbackReason::StartupFailed] {
+            let mut state = BootState::parse("active=V1\ncandidate=V2\nmode=application\n");
+            apply_candidate_result(&mut state, false);
+            state.rollback_reason = reason;
+
+            let restored = BootState::parse(&state.to_text());
+            assert_eq!(restored.active, AppSlot::V1);
+            assert_eq!(restored.candidate, None);
+            assert_eq!(restored.last_update, UpdateStatus::Rollback);
+            assert_eq!(restored.rollback_reason, reason);
+        }
+    }
+
+    #[test]
+    fn test_rollback_reason_cleared_after_success() {
+        let mut state = BootState::parse(
+            "active=V1\ncandidate=V2\nmode=application\nlast_update=rollback\nrollback_reason=startup_failed\n",
+        );
+        assert_eq!(state.rollback_reason, RollbackReason::StartupFailed);
+
+        apply_candidate_result(&mut state, true);
+        state.rollback_reason = RollbackReason::None;
+
+        let restored = BootState::parse(&state.to_text());
+        assert_eq!(restored.active, AppSlot::V2);
+        assert_eq!(restored.last_update, UpdateStatus::Success);
+        assert_eq!(restored.rollback_reason, RollbackReason::None);
     }
 
     #[test]
