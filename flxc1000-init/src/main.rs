@@ -260,7 +260,9 @@ fn handle_bootloader_handoff(
 
     match read_to_string(path) {
         Ok(actual) if actual == expected => {
-            eprintln!("[init] Updated boot state is visible, but power-loss durability is unconfirmed");
+            eprintln!(
+                "[init] Updated boot state is visible, but power-loss durability is unconfirmed"
+            );
             return HandoffOutcome::StartBootloader;
         }
         Ok(actual) if actual == original => {}
@@ -549,26 +551,24 @@ fn main() {
         eprintln!("Succeded to start start openssh server");
     }
 
-    let mut boot_state = match handle_bootloader_handoff(
-        Path::new(BOOT_STATE_PATH),
-        persist_consumed_request,
-    ) {
-        HandoffOutcome::StartBootloader => {
-            eprintln!("[init] Bootloader request consumed");
-            exec_binary(BOOT_BINARY);
-        }
-        HandoffOutcome::RestartActive(slot) => {
-            let path = slot.binary_path();
-            if !Path::new(path).is_file() {
-                eprintln!("[init] Active application binary missing: {path}");
-                hold_on_unsafe_boot_state();
+    let mut boot_state =
+        match handle_bootloader_handoff(Path::new(BOOT_STATE_PATH), persist_consumed_request) {
+            HandoffOutcome::StartBootloader => {
+                eprintln!("[init] Bootloader request consumed");
+                exec_binary(BOOT_BINARY);
             }
-            eprintln!("[init] Update handoff cancelled; restarting {slot:?}");
-            exec_binary(path);
-        }
-        HandoffOutcome::ContinueNormalStartup(state) => state,
-        HandoffOutcome::Unsafe => hold_on_unsafe_boot_state(),
-    };
+            HandoffOutcome::RestartActive(slot) => {
+                let path = slot.binary_path();
+                if !Path::new(path).is_file() {
+                    eprintln!("[init] Active application binary missing: {path}");
+                    hold_on_unsafe_boot_state();
+                }
+                eprintln!("[init] Update handoff cancelled; restarting {slot:?}");
+                exec_binary(path);
+            }
+            HandoffOutcome::ContinueNormalStartup(state) => state,
+            HandoffOutcome::Unsafe => hold_on_unsafe_boot_state(),
+        };
 
     eprintln!("[init] boot_state = {:?}", boot_state);
 
@@ -824,8 +824,10 @@ mod tests {
 
     #[test]
     fn test_consume_bootloader_request() {
-        let before = "note=mode=bootloader\r\nactive=V2\r\ncandidate=V1\r\nmode=bootloader\r\nextra=keep";
-        let expected = "note=mode=bootloader\r\nactive=V2\r\ncandidate=V1\r\nmode=application\r\nextra=keep";
+        let before =
+            "note=mode=bootloader\r\nactive=V2\r\ncandidate=V1\r\nmode=bootloader\r\nextra=keep";
+        let expected =
+            "note=mode=bootloader\r\nactive=V2\r\ncandidate=V1\r\nmode=application\r\nextra=keep";
 
         let result = consume_bootloader_request(before).unwrap();
 
@@ -881,8 +883,10 @@ mod tests {
             let path = test_path("normal");
             fs::write(&path, EXPECTED).unwrap();
             let outcome = handle_bootloader_handoff(&path, |_, _| panic!("unexpected write"));
-            assert!(matches!(outcome, HandoffOutcome::ContinueNormalStartup(state)
-                if state.active == AppSlot::V1 && state.candidate == Some(AppSlot::V2)));
+            assert!(
+                matches!(outcome, HandoffOutcome::ContinueNormalStartup(state)
+                if state.active == AppSlot::V1 && state.candidate == Some(AppSlot::V2))
+            );
             fs::remove_file(path).unwrap();
         }
 
@@ -917,7 +921,10 @@ mod tests {
             for active in [AppSlot::V1, AppSlot::V2] {
                 let path = test_path(active.as_str());
                 let candidate = if active == AppSlot::V1 { "V2" } else { "V1" };
-                let fields = format!("active={}\ncandidate={candidate}\nextra=keep\n", active.as_str());
+                let fields = format!(
+                    "active={}\ncandidate={candidate}\nextra=keep\n",
+                    active.as_str()
+                );
                 fs::write(&path, format!("{fields}mode=bootloader\n")).unwrap();
                 let mut writes = 0;
                 let outcome = handle_bootloader_handoff(&path, |path, contents| {
@@ -929,7 +936,10 @@ mod tests {
                 });
                 assert!(matches!(outcome, HandoffOutcome::RestartActive(slot) if slot == active));
                 assert_eq!(writes, 2);
-                assert_eq!(fs::read_to_string(&path).unwrap(), format!("{fields}mode=application\n"));
+                assert_eq!(
+                    fs::read_to_string(&path).unwrap(),
+                    format!("{fields}mode=application\n")
+                );
                 fs::remove_file(path).unwrap();
             }
         }

@@ -41,8 +41,6 @@ const RESET_NONE: u8 = 0;
 const RESET_HARD: u8 = 1;
 const RESET_SOFT: u8 = 3;
 
-//const UPDATE_FILE: &str = "app/update.tmp";
-
 const APP_V1_BINARY: &str = "/app/flxc1000-app-v1";
 const APP_V2_BINARY: &str = "/app/flxc1000-app-v2";
 const BOOT_STATE_PATH: &str = "/data/boot_state";
@@ -356,7 +354,6 @@ impl ServerHandler for BootHandler {
         _encrypting_method: u8,
         buf: &mut [u8],
     ) -> Result<usize, BuiltinNrc> {
-        // Stage 1: stub positive response
         tracing::info!("RequestDownload: preparing update file");
 
         let expected_size = memory_size
@@ -377,12 +374,9 @@ impl ServerHandler for BootHandler {
 
         let boot_state = parse_boot_state_for_update(&boot_state_contents)?;
 
-        // let target_slot = boot_state.active.other();
-        // let target_path = target_slot.binary_path();
-        // self.target_slot = Some(target_slot);
         let target_slot = boot_state.active.other();
 
-        //Write to the temporary download file
+        // Write to the temporary download file
         let target_path = target_slot.download_path();
 
         let mut boot_state = boot_state;
@@ -416,11 +410,11 @@ impl ServerHandler for BootHandler {
         self.expected_size = expected_size;
         self.received_size = 0;
 
-        //Start the update light show
+        // Start the update light show
         self.shared.update_active.store(true, Ordering::Relaxed);
 
-        // lengthFormatIdentifier: 0x20 (2 bytes for maxBlockLength)
-        // maxNumberOfBlockLength: 0x0FFF (4095 bytes)
+        // lengthFormatIdentifier: 0x40 (4 bytes for maxNumberOfBlockLength)
+        // maxNumberOfBlockLength: 0x00000FFF (4095 bytes)
         buf[0] = 0x40;
         buf[1] = 0x00;
         buf[2] = 0x00;
@@ -740,10 +734,6 @@ async fn main() {
         ECU_ADDRESS
     );
 
-    // if let Err(e) = rgb::white_test() {
-    //     tracing::warn!("RGB boot test failed: {}",e);
-    // }
-
     let mac = get_mac_address();
     tracing::info!(
         "EID (MAC): {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
@@ -896,7 +886,7 @@ mod test {
         let expected_size = 1000;
         let mut received_size = 0;
 
-        //Simulate two UDS TransferData chunks
+        // Simulate two UDS TransferData chunks
         let chunk1 = vec![0xAA; 500];
         let chunk2 = vec![0xBB; 500];
 
@@ -907,7 +897,7 @@ mod test {
         file.sync_all().unwrap();
         drop(file);
 
-        //Check the actual data stored on the disk
+        // Check the actual data stored on the disk
         let contents = std::fs::read(&path).unwrap();
 
         assert_eq!(contents.len(), 1000);
@@ -930,7 +920,7 @@ mod test {
         let expected_size = 1000;
         let mut received_size = 0;
 
-        //Only 40% of the application arrives
+        // Only 40% of the application arrives
         let chunk = vec![0xAA; 400];
 
         write_transfer_chunk(&mut file, &mut received_size, expected_size, &chunk).unwrap();
@@ -938,14 +928,14 @@ mod test {
         file.sync_all().unwrap();
         drop(file);
 
-        //Verify all 400 bytes were stored
+        // Verify all 400 bytes were stored
         let contents = std::fs::read(&path).unwrap();
 
         assert_eq!(contents.len(), 400);
         assert_eq!(contents, chunk);
         assert_eq!(received_size, 400);
 
-        //Finalization must reject the incomplete download
+        // Finalization must reject the incomplete download
         assert!(validate_download_size(expected_size, received_size).is_err());
 
         std::fs::remove_file(path).unwrap();
@@ -1028,7 +1018,7 @@ mod test {
 
         let state_path = test_dir.join("boot_state");
 
-        //Start with V1 active and V2 selected as candidate
+        // Start with V1 active and V2 selected as candidate
         let mut state = BootState {
             active: AppSlot::V1,
             candidate: Some(AppSlot::V2),
@@ -1036,13 +1026,13 @@ mod test {
 
         write_boot_state_to_path(&state, &state_path).unwrap();
 
-        //Simulate RequestDownload preparing for another V2 update
+        // Simulate RequestDownload preparing for another V2 update
         clear_candidate(&mut state, &state_path).unwrap();
 
-        //Simulate an expected interruption
+        // Simulate an expected interruption
         drop(state);
 
-        //Read the persisted state as fresh process would.
+        // Read the persisted state as fresh process would.
         let contents = fs::read_to_string(&state_path).unwrap();
         let restored = BootState::parse(&contents);
 
@@ -1071,7 +1061,7 @@ mod test {
 
     #[test]
     fn test_missing_active_slot_rejected() {
-        let text = "active=V1\ncandidate=V1\nmode=application\n";
+        let text = "candidate=V1\nmode=application\n";
 
         assert!(parse_boot_state_for_update(text).is_err());
     }
