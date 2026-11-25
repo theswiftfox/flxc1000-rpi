@@ -140,7 +140,7 @@ s.close()
 
 From the repository root, the complete Raspberry Pi 4 image can be built using:
 
-```bash 
+```bash
 ./scripts/rpi-build.sh --board rpi4
 ```
 The script builds the Rust binaries, prepares the Buildroot and generates the SD card image. The generated image is available at:
@@ -181,7 +181,7 @@ Output in `output/images/`:
 
 ### 4. Flash to SD card
 
-If the image was built using `rpi-build.sh` run the flashing script from the repository root: 
+If the image was built using `rpi-build.sh` run the flashing script from the repository root:
 ```bash
 # macOS
 ./scripts/flash-sdcard.sh /dev/diskN
