@@ -136,6 +136,20 @@ s.close()
 
 ## Full SD Card Build (Buildroot)
 
+### Build using the provided script
+
+From the repository root, the complete Raspberry Pi 4 image can be built using:
+
+```bash
+./scripts/rpi-build.sh --board rpi4
+```
+The script builds the Rust binaries, prepares the Buildroot and generates the SD card image. The generated image is available at:
+
+```bash
+buildroot-build/images/sdcard.img
+```
+
+If the build script is used, continue with step 4 to flash the SD card.
 ### 1. Clone Buildroot
 
 ```bash
@@ -156,7 +170,7 @@ make menuconfig
 ### 3. Build (first build takes 20–40 min)
 
 ```bash
-# Make sure Rust binaries are already cross-compiled (step 1 above)
+# Make sure Rust binaries are already cross-compiled
 make -j$(nproc)
 ```
 
@@ -166,6 +180,16 @@ Output in `output/images/`:
 - `rootfs.cpio.lz4` — initramfs
 
 ### 4. Flash to SD card
+
+If the image was built using `rpi-build.sh` run the flashing script from the repository root:
+```bash
+# macOS
+./scripts/flash-sdcard.sh /dev/diskN
+
+# Linux
+./scripts/flash-sdcard.sh /dev/sdX
+```
+If you followed steps 1-3 above and are still inside the separate `buildroot` directory:
 
 ```bash
 # macOS
